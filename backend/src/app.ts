@@ -7,10 +7,12 @@ import { providerConfigRouter } from './modules/provider-configs/provider-config
 import { connectedAccountRouter } from './modules/connected-accounts/connected-account.routes.js'
 import { storageRouter } from './modules/storage/storage.routes.js'
 import { uploadRouter } from './modules/uploads/upload.routes.js'
+import { downloadRouter } from './modules/downloads/download.routes.js'
 import { fileRouter } from './modules/files/file.routes.js'
 import { folderRouter } from './modules/folders/folder.routes.js'
 import { publicRouter } from './modules/public/public.routes.js'
 import { inviteRouter } from './modules/invites/invite.routes.js'
+import { apiKeyRouter } from './modules/api-keys/api-key.routes.js'
 
 export const app = express()
 
@@ -24,7 +26,9 @@ app.use('/provider-configs', providerConfigRouter)
 app.use('/connected-accounts', connectedAccountRouter)
 app.use('/storage', storageRouter)
 app.use('/uploads', uploadRouter)
+app.use('/downloads', downloadRouter)
 app.use('/files', fileRouter)
 app.use('/folders', folderRouter)
 app.use('/invites', inviteRouter)
+app.use('/api-keys', apiKeyRouter)
 app.use(errorMiddleware)

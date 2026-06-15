@@ -3,11 +3,11 @@ import { Router } from 'express'
 import { google } from 'googleapis'
 import { env } from '../../config/env.js'
 import { prisma } from '../../config/prisma.js'
-import { requireAuth, type AuthRequest } from '../../middleware/auth.middleware.js'
+import { requireAuth, requireAuthOrApiKey, type AuthRequest } from '../../middleware/auth.middleware.js'
 import { ensureGoogleAppFolder, getAuthedGoogleClient, syncGoogleQuota } from '../google/google.service.js'
 
 export const uploadRouter = Router()
-uploadRouter.use(requireAuth)
+uploadRouter.use(requireAuthOrApiKey)
 
 type UploadMeta = { fieldName: string; fileName: string; mimeType: string; sizeBytes: bigint; folderId?: string }
 
@@ -77,39 +77,35 @@ uploadRouter.post('/', async (req: AuthRequest, res, next) => {
     const metaForFile = (fieldName: string, info: { filename: string; mimeType: string }) => {
       if (batchMeta) return batchMeta.find((item) => item.fieldName === fieldName)
       const sizeBytes = fields.sizeBytes
-      if (!sizeBytes) return null
-      return { fieldName, sizeBytes, fileName: fields.fileName || info.filename, mimeType: fields.mimeType || info.mimeType || 'application/octet-stream', folderId: fields.folderId }
+      return { fieldName, sizeBytes: sizeBytes ?? 0n, fileName: fields.fileName || info.filename, mimeType: fields.mimeType || info.mimeType || 'application/octet-stream', folderId: fields.folderId }
     }
 
     const uploadOne = async (fieldName: string, fileStream: NodeJS.ReadableStream, info: { filename: string; mimeType: string }) => {
       const meta = metaForFile(fieldName, info)
       const fileName = meta?.fileName || info.filename
+      const knownSize = (meta?.sizeBytes ?? 0n) > 0n
       try {
         fileStream.on('limit', () => logUpload('file stream size limit reached', { fileName }))
-        if (!meta?.sizeBytes || meta.sizeBytes <= 0n) {
-          fileStream.resume()
-          failed.push({ fileName, code: 'UPLOAD_SIZE_REQUIRED', message: 'sizeBytes field must be sent before file field.' })
-          return
-        }
-        if (meta.sizeBytes > BigInt(env.MAX_UPLOAD_BYTES)) {
+        if (knownSize && meta!.sizeBytes > BigInt(env.MAX_UPLOAD_BYTES)) {
           fileStream.resume()
           failed.push({ fileName, code: 'UPLOAD_TOO_LARGE', message: 'File exceeds max upload size.' })
           return
         }
 
-        const account = await selectAccount(req.user!.id, meta.sizeBytes, reservedBytesByAccount)
+        const account = await selectAccount(req.user!.id, knownSize ? meta!.sizeBytes : 0n, reservedBytesByAccount)
         if (!account) {
           fileStream.resume()
           failed.push({ fileName, code: 'NO_ACCOUNT_WITH_ENOUGH_SPACE', message: 'No connected Google Drive account has enough space for this upload.' })
           return
         }
-        reservedBytesByAccount.set(account.id, (reservedBytesByAccount.get(account.id) ?? 0n) + meta.sizeBytes)
+        if (knownSize) reservedBytesByAccount.set(account.id, (reservedBytesByAccount.get(account.id) ?? 0n) + meta!.sizeBytes)
 
-        const folderId = meta.folderId || null
+        const folderId = meta!.folderId || null
         if (folderId) await prisma.folder.findFirstOrThrow({ where: { id: folderId, userId: req.user!.id, deletedAt: null } })
 
-        const session = await prisma.uploadSession.create({ data: { userId: req.user!.id, targetConnectedAccountId: account.id, fileName, mimeType: meta.mimeType, sizeBytes: meta.sizeBytes, status: 'uploading' } })
-        logUpload('file upload started', { sessionId: session.id, accountId: account.id, fileName, sizeBytes: meta.sizeBytes.toString() })
+        const sessionSize = knownSize ? meta!.sizeBytes : 0n
+        const session = await prisma.uploadSession.create({ data: { userId: req.user!.id, targetConnectedAccountId: account.id, fileName, mimeType: meta!.mimeType, sizeBytes: sessionSize, status: 'uploading' } })
+        logUpload('file upload started', { sessionId: session.id, accountId: account.id, fileName, sizeBytes: knownSize ? meta!.sizeBytes.toString() : 'unknown' })
         const auth = await getAuthedGoogleClient(account)
         const drive = google.drive({ version: 'v3', auth })
         const appFolderId = await ensureGoogleAppFolder(account)
@@ -121,17 +117,18 @@ uploadRouter.post('/', async (req: AuthRequest, res, next) => {
 
         const uploaded = await drive.files.create({
           requestBody: { name: fileName, parents: [appFolderId] },
-          media: { mimeType: meta.mimeType, body: fileStream },
+          media: { mimeType: meta!.mimeType, body: fileStream },
           fields: 'id,name,mimeType,size',
         })
         logUpload('google upload completed', { sessionId: session.id, accountId: account.id, fileName })
 
-        if (streamedBytes !== meta.sizeBytes) {
+        if (knownSize && streamedBytes !== meta!.sizeBytes) {
           await prisma.uploadSession.update({ where: { id: session.id }, data: { status: 'failed', errorMessage: 'Streamed byte count did not match declared size.' } })
           failed.push({ fileName, code: 'UPLOAD_SIZE_MISMATCH', message: 'Streamed byte count did not match declared size.' })
           return
         }
 
+        const fileSize = knownSize ? meta!.sizeBytes : streamedBytes
         const file = await prisma.file.create({
           data: {
             userId: req.user!.id,
@@ -140,12 +137,12 @@ uploadRouter.post('/', async (req: AuthRequest, res, next) => {
             provider: 'google_drive',
             providerFileId: uploaded.data.id ?? '',
             name: uploaded.data.name ?? fileName,
-            mimeType: uploaded.data.mimeType ?? meta.mimeType,
-            sizeBytes: meta.sizeBytes,
+            mimeType: uploaded.data.mimeType ?? meta!.mimeType,
+            sizeBytes: fileSize,
           },
         })
         logUpload('database file created', { sessionId: session.id, fileId: file.id, accountId: account.id })
-        await prisma.uploadSession.update({ where: { id: session.id }, data: { status: 'completed', completedAt: new Date() } })
+        await prisma.uploadSession.update({ where: { id: session.id }, data: { status: 'completed', completedAt: new Date(), sizeBytes: fileSize } })
         completed.push({ ...file, sizeBytes: file.sizeBytes.toString() })
         syncQuotaInBackground(account.id, session.id)
       } catch (error) {

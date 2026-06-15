@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
-import { Bell, Cloud, Globe, HardDrive, Link2, RefreshCw, Trash2 } from 'lucide-react'
+import { Bell, Check, Cloud, Copy, Globe, HardDrive, Key, Link2, Plus, RefreshCw, Trash2, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
 import { DummyModal } from '@/components/drive/DummyModal'
 import { PageHeader } from '@/components/drive/PageHeader'
-import { apiFetch, formatBytes } from '@/lib/api'
+import { apiFetch, formatBytes, formatDate } from '@/lib/api'
 import { getGravatarUrl } from '@/lib/gravatar'
 import { getStoredUser } from '@/lib/auth'
 
@@ -19,6 +20,11 @@ export function SettingsPage() {
   const [disconnectingAccountId, setDisconnectingAccountId] = useState<string | null>(null)
   const [accountToDisconnect, setAccountToDisconnect] = useState<ConnectedAccount | null>(null)
   const [profileImageUrl, setProfileImageUrl] = useState('')
+  const [apiKeys, setApiKeys] = useState<Array<{ id: string; name: string; keyPrefix: string; lastUsedAt: string | null; expiresAt: string | null; createdAt: string }>>([])
+  const [newKeyName, setNewKeyName] = useState('')
+  const [newKeyResult, setNewKeyResult] = useState<{ name: string; rawKey: string } | null>(null)
+  const [creatingKey, setCreatingKey] = useState(false)
+  const [copied, setCopied] = useState(false)
   const [selectedAccountId, setSelectedAccountId] = useState('')
   const selectedAccount = accounts.find((account) => account.id === selectedAccountId) ?? accounts[0] ?? null
 
@@ -29,6 +35,10 @@ export function SettingsPage() {
 
   useEffect(() => {
     load().catch((error) => setMessage(error instanceof Error ? error.message : 'Failed to load settings'))
+  }, [])
+
+  useEffect(() => {
+    apiFetch<{ keys: typeof apiKeys }>('/api-keys').then((d) => setApiKeys(d.keys)).catch(() => undefined)
   }, [])
 
   useEffect(() => {
@@ -93,6 +103,38 @@ export function SettingsPage() {
     }
   }
 
+  async function createKey() {
+    if (!newKeyName.trim()) return
+    setCreatingKey(true)
+    try {
+      const data = await apiFetch<{ key: { id: string; name: string; keyPrefix: string; rawKey: string } }>('/api-keys', { method: 'POST', body: JSON.stringify({ name: newKeyName.trim() }) })
+      setNewKeyResult({ name: data.key.name, rawKey: data.key.rawKey })
+      setNewKeyName('')
+      const keysData = await apiFetch<{ keys: typeof apiKeys }>('/api-keys')
+      setApiKeys(keysData.keys)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Failed to create API key')
+    } finally {
+      setCreatingKey(false)
+    }
+  }
+
+  async function revokeKey(id: string) {
+    try {
+      await apiFetch(`/api-keys/${id}`, { method: 'DELETE' })
+      setApiKeys((prev) => prev.filter((k) => k.id !== id))
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Failed to revoke API key')
+    }
+  }
+
+  function copyKey() {
+    if (!newKeyResult) return
+    navigator.clipboard.writeText(newKeyResult.rawKey).catch(() => undefined)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 3000)
+  }
+
   return (
     <>
       <PageHeader title="Setting" description="Manage account and connected storage." actions={<Button className="col-span-2 w-full sm:col-span-1" onClick={connectDrive} disabled={connecting}><Link2 className="h-4 w-4" />{connecting ? 'Connecting...' : 'Connect Drive'}</Button>} />
@@ -133,6 +175,35 @@ export function SettingsPage() {
                   </div>
                 </div> : null}
               </>}
+            </div>
+          </Card>
+          <Card className="p-4 sm:p-5">
+            <div className="flex items-center gap-3"><Key className="h-6 w-6 text-blue-600" /><h2 className="text-xl font-extrabold">API Keys</h2></div>
+            <p className="mt-2 text-sm text-slate-500">Generate API keys for third-party integrations. Use <code className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-mono">X-API-Key</code> header to authenticate.</p>
+
+            {newKeyResult ? <div className="mt-4 rounded-xl border border-green-200 bg-green-50 p-4">
+              <p className="text-sm font-semibold text-green-800">API Key Created</p>
+              <p className="mt-1 text-xs text-green-700">Copy this key now — it won't be shown again.</p>
+              <div className="mt-3 flex items-center gap-2">
+                <code className="flex-1 break-all rounded-lg border border-green-300 bg-white px-3 py-2 text-xs font-mono">{newKeyResult.rawKey}</code>
+                <Button variant="outline" size="icon" onClick={copyKey}>{copied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}</Button>
+              </div>
+              <Button className="mt-3 w-full" variant="outline" onClick={() => { setNewKeyResult(null); setCopied(false) }}><X className="h-4 w-4" />Close</Button>
+            </div> : null}
+
+            <div className="mt-4 flex items-center gap-3">
+              <Input placeholder="Key name (e.g. My Project 3)" value={newKeyName} onChange={(event) => setNewKeyName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') createKey() }} />
+              <Button onClick={createKey} disabled={creatingKey || !newKeyName.trim()}><Plus className="h-4 w-4" />{creatingKey ? 'Creating...' : 'Create'}</Button>
+            </div>
+
+            <div className="mt-4 grid gap-2">
+              {apiKeys.length === 0 ? <p className="text-sm text-slate-500">No API keys yet.</p> : apiKeys.map((key) => <div key={key.id} className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3">
+                <div className="min-w-0 flex-1">
+                  <p className="font-semibold text-sm">{key.name}</p>
+                  <p className="text-xs text-slate-500 font-mono">{key.keyPrefix}...{key.lastUsedAt ? <span className="ml-2">Last used: {formatDate(key.lastUsedAt)}</span> : <span className="ml-2">Never used</span>}</p>
+                </div>
+                <Button variant="danger" size="sm" onClick={() => revokeKey(key.id)}><Trash2 className="h-4 w-4" />Revoke</Button>
+              </div>)}
             </div>
           </Card>
         </div>

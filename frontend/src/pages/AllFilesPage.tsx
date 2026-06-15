@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type DragEvent, type FormEvent, type MouseEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Archive, CheckCircle, ChevronDown, ClipboardPaste, FolderInput, FolderPlus, LayoutGrid, List, MoreVertical, RefreshCw, Star, Trash2, Upload, X } from 'lucide-react'
+import { Archive, CheckCircle, ChevronDown, ClipboardPaste, Download, FolderInput, FolderPlus, LayoutGrid, List, MoreVertical, RefreshCw, Star, Trash2, Upload, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { DummyModal } from '@/components/drive/DummyModal'
@@ -77,6 +77,10 @@ export function AllFilesPage() {
   const activeFolderId = searchParams.get('folderId')
   const searchQuery = searchParams.get('q')?.trim() ?? ''
   const [uploadOpen, setUploadOpen] = useState(false)
+  const [downloadUrlOpen, setDownloadUrlOpen] = useState(false)
+  const [downloadUrl, setDownloadUrl] = useState('')
+  const [downloadSelectedFolderId, setDownloadSelectedFolderId] = useState('')
+  const [downloadProgress, setDownloadProgress] = useState<{ sessionId: string; fileName: string; percent: number; status: string; error?: string } | null>(null)
   const [folderOpen, setFolderOpen] = useState(false)
   const [renameOpen, setRenameOpen] = useState(false)
   const [folderRenameOpen, setFolderRenameOpen] = useState(false)
@@ -244,6 +248,58 @@ export function AllFilesPage() {
       setSyncingDrive(false)
     }
   }
+
+  async function downloadFromUrl(event: FormEvent) {
+    event.preventDefault()
+    if (!downloadUrl.trim()) return
+    setMessage('')
+    try {
+      const data = await apiFetch<{ sessionId: string }>('/downloads', {
+        method: 'POST',
+        body: JSON.stringify({ url: downloadUrl.trim(), folderId: downloadSelectedFolderId || activeFolderId || undefined }),
+      })
+      setDownloadProgress({ sessionId: data.sessionId, fileName: '', percent: 0, status: 'pending' })
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Download failed')
+    }
+  }
+
+  type DownloadProgressResponse = { sessionId: string; status: string; fileName: string; bytesDownloaded: string; bytesTotal: string; percent: number; fileId?: string; error?: string | null }
+
+  useEffect(() => {
+    if (!downloadProgress) return
+    const id = downloadProgress.sessionId
+    if (downloadProgress.status === 'completed' || downloadProgress.status === 'failed') return
+
+    const interval = window.setInterval(async () => {
+      try {
+        const p = await apiFetch<DownloadProgressResponse>(`/downloads/${id}/progress`)
+        setDownloadProgress({
+          sessionId: p.sessionId,
+          fileName: p.fileName,
+          percent: p.percent,
+          status: p.status,
+          error: p.error ?? undefined,
+        })
+        if (p.status === 'completed') {
+          setDownloadUrl('')
+          setDownloadSelectedFolderId('')
+          setDownloadUrlOpen(false)
+          setMessage(`File "${p.fileName}" downloaded and saved to Google Drive.`)
+          loadFiles().catch(() => undefined)
+          window.dispatchEvent(new Event('9drive:storage-changed'))
+          setDownloadProgress(null)
+        }
+        if (p.status === 'failed') {
+          setMessage(p.error || 'Download failed')
+        }
+      } catch {
+        window.clearInterval(interval)
+      }
+    }, 800)
+
+    return () => window.clearInterval(interval)
+  }, [downloadProgress?.sessionId, downloadProgress?.status])
 
   function selectUploadFiles(files: FileList | File[] | null | undefined) {
     if (!files) return
@@ -515,7 +571,7 @@ export function AllFilesPage() {
   return (
     <>
       <div onContextMenu={openEmptyContextMenu} className="min-h-[620px] w-full min-w-0">
-      <PageHeader title={activeFolder ? <span className="block min-w-0 truncate"><button className="text-blue-600 hover:underline" onClick={closeFolder}>All Files</button>{folderBreadcrumbs.map((folder, index) => <span key={folder.id}><span className="text-slate-400"> / </span>{index === folderBreadcrumbs.length - 1 ? <span>{folder.name}</span> : <button className="text-blue-600 hover:underline" onClick={() => folder.id && openFolderById(folder.id)}>{folder.name}</button>}</span>)}</span> : 'All Files'} actions={<><Button className="w-full" onClick={() => setUploadOpen(true)}><Upload className="h-4 w-4" />Upload</Button><Button className="w-full" variant="outline" onClick={() => setFolderOpen(true)}><FolderPlus className="h-4 w-4" />New Folder</Button><Button className="w-full" variant="outline" disabled={syncingDrive} onClick={syncGoogleDrive}><RefreshCw className={syncingDrive ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />{syncingDrive ? 'Syncing...' : 'Sync Drive'}</Button></>} />
+      <PageHeader title={activeFolder ? <span className="block min-w-0 truncate"><button className="text-blue-600 hover:underline" onClick={closeFolder}>All Files</button>{folderBreadcrumbs.map((folder, index) => <span key={folder.id}><span className="text-slate-400"> / </span>{index === folderBreadcrumbs.length - 1 ? <span>{folder.name}</span> : <button className="text-blue-600 hover:underline" onClick={() => folder.id && openFolderById(folder.id)}>{folder.name}</button>}</span>)}</span> : 'All Files'} actions={<><Button className="w-full" onClick={() => setUploadOpen(true)}><Upload className="h-4 w-4" />Upload</Button><Button className="w-full" variant="outline" onClick={() => setDownloadUrlOpen(true)}><Download className="h-4 w-4" />Download URL</Button><Button className="w-full" variant="outline" onClick={() => setFolderOpen(true)}><FolderPlus className="h-4 w-4" />New Folder</Button><Button className="w-full" variant="outline" disabled={syncingDrive} onClick={syncGoogleDrive}><RefreshCw className={syncingDrive ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />{syncingDrive ? 'Syncing...' : 'Sync Drive'}</Button></>} />
       {message ? <p className="mt-5 rounded-xl bg-blue-50 p-3 text-sm text-blue-700">{message}</p> : null}
       {!activeFolder && (recentFolders.length > 0 ? <FolderGrid items={recentFolders} mobileTwoColumns onFolderMenu={openFolderMenu} onFolderOpen={openFolder} /> : <p className="mt-8 rounded-xl bg-slate-50 p-5 text-sm text-slate-500">No folders yet. Click New Folder to organize uploads.</p>)}
       {!activeFolder && moreFolders.length > 0 ? <Card className="mt-5 p-4 sm:p-5"><h2 className="font-extrabold">More Folders</h2><div className="mt-4 grid gap-3 sm:grid-cols-2">{moreFolders.map((folder) => <div key={folder.id} onClick={() => openFolder(folder)} onContextMenu={(event) => openFolderMenu(event, folder)} className="flex cursor-pointer items-center justify-between gap-3 rounded-xl bg-slate-50 p-3 hover:bg-slate-100"><div className="flex min-w-0 items-center gap-3"><FolderVisual folder={folder} className="h-6 w-6 shrink-0" /><div className="min-w-0"><p className="truncate font-semibold">{folder.name}</p><p className="truncate text-xs text-slate-500">{folder.updated}</p></div></div><button className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-white sm:h-8 sm:w-8 sm:rounded-lg" onClick={(event) => { event.stopPropagation(); openFolderMenu(event, folder) }} aria-label={`Open ${folder.name} menu`}><MoreVertical className="h-5 w-5" /></button></div>)}</div></Card> : null}
@@ -545,6 +601,32 @@ export function AllFilesPage() {
           <div className="grid gap-3 sm:flex sm:justify-end"><Button type="button" variant="outline" onClick={() => setUploadOpen(false)}>Cancel</Button><Button disabled={loading || selectedFiles.length === 0}>{loading ? 'Uploading...' : `Upload${selectedFiles.length > 1 ? ` ${selectedFiles.length} files` : ''}`}</Button></div>
         </form>
       </DummyModal>
+       <DummyModal open={downloadUrlOpen} title={downloadProgress ? 'Downloading...' : 'Download from URL'} description={downloadProgress?.fileName || 'Download a file from an external URL and save it to Google Drive.'} onClose={() => { if (!downloadProgress) setDownloadUrlOpen(false) }}>
+         {downloadProgress ? (
+           <div className="grid gap-4">
+             <p className="truncate text-sm font-semibold">{downloadProgress.fileName || 'Starting download...'}</p>
+             <div className="h-2 rounded-full bg-slate-100">
+               <div className={downloadProgress.status === 'failed' ? 'h-full rounded-full bg-red-500' : downloadProgress.status === 'completed' ? 'h-full rounded-full bg-emerald-500' : 'h-full rounded-full bg-blue-600'} style={{ width: `${downloadProgress.percent}%` }} />
+             </div>
+             <div className="flex items-center justify-between text-sm text-slate-500">
+               <span>{downloadProgress.status === 'fetching' ? 'Fetching URL...' : downloadProgress.status === 'downloading' ? 'Downloading...' : downloadProgress.status === 'uploading' ? 'Uploading to Google Drive...' : downloadProgress.status === 'completed' ? 'Complete' : downloadProgress.status === 'failed' ? 'Failed' : 'Starting...'}</span>
+               <span>{downloadProgress.percent}%</span>
+             </div>
+             {downloadProgress.error ? <p className="rounded-xl bg-red-50 p-3 text-sm text-red-700">{downloadProgress.error}</p> : null}
+             {downloadProgress.status === 'completed' || downloadProgress.status === 'failed' ? (
+               <div className="flex justify-end pt-2">
+                 <Button onClick={() => { setDownloadProgress(null); setDownloadUrlOpen(false); setDownloadUrl('') }}>Close</Button>
+               </div>
+             ) : null}
+           </div>
+         ) : (
+           <form onSubmit={downloadFromUrl} className="grid gap-4">
+             <label className="grid gap-2 text-sm font-semibold">File URL<Input type="url" value={downloadUrl} onChange={(event) => setDownloadUrl(event.target.value)} placeholder="https://example.com/file.pdf" required /></label>
+             {activeFolder ? <p className="rounded-xl bg-slate-50 p-3 text-sm text-slate-600">Saving to: <b>{activeFolder.name}</b></p> : <label className="grid gap-2 text-sm font-semibold">Virtual Folder<select className="h-11 rounded-xl border border-slate-200 px-3 text-sm" value={downloadSelectedFolderId} onChange={(event) => setDownloadSelectedFolderId(event.target.value)}><option value="">No folder</option>{allFolders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label>}
+             <div className="grid gap-3 pt-2 sm:flex sm:justify-end"><Button type="button" variant="outline" onClick={() => setDownloadUrlOpen(false)}>Cancel</Button><Button disabled={!downloadUrl.trim()}>Download</Button></div>
+           </form>
+         )}
+       </DummyModal>
        <DummyModal open={folderOpen} title="New Folder" description="Create a virtual folder for organizing files." onClose={() => setFolderOpen(false)}>
         <form onSubmit={createFolder} className="grid gap-4">
           <label className="grid gap-2 text-sm font-semibold">Folder Name<Input value={folderName} onChange={(event) => setFolderName(event.target.value)} placeholder="Project Assets" required /></label>
