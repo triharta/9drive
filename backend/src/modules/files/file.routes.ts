@@ -3,7 +3,7 @@ import { google } from 'googleapis'
 import { z } from 'zod'
 import { prisma } from '../../config/prisma.js'
 import { env } from '../../config/env.js'
-import { requireAuth, type AuthRequest } from '../../middleware/auth.middleware.js'
+import { requireAuthOrApiKey, type AuthRequest } from '../../middleware/auth.middleware.js'
 import { hashToken, randomToken } from '../../utils/crypto.js'
 import { getAuthedGoogleClient, syncGoogleAppFolderFiles, syncGoogleQuota } from '../google/google.service.js'
 import { streamGoogleFile } from './stream-google-file.js'
@@ -24,13 +24,13 @@ fileRouter.get('/preview/:token', async (req, res, next) => {
   }
 })
 
-fileRouter.use(requireAuth)
+fileRouter.use(requireAuthOrApiKey)
 
 fileRouter.get('/', async (req: AuthRequest, res, next) => {
   try {
     const query = z.object({ folderId: z.string().optional(), q: z.string().trim().max(255).optional() }).parse(req.query)
     const files = await prisma.file.findMany({ where: { userId: req.user!.id, status: 'active', ...(query.folderId ? { folderId: query.folderId } : {}), ...(query.q ? { name: { contains: query.q } } : {}) }, include: { connectedAccount: { select: { id: true, email: true, provider: true } }, folder: { select: { id: true, name: true } } }, orderBy: { createdAt: 'desc' } })
-    return res.json({ files: files.map((file) => ({ ...file, sizeBytes: file.sizeBytes.toString() })) })
+    return res.json({ files: files.map((file) => ({ id: file.id, name: file.name, mimeType: file.mimeType, sizeBytes: file.sizeBytes.toString(), folderId: file.folderId, folderName: file.folder?.name ?? null, createdAt: file.createdAt })) })
   } catch (error) {
     return next(error)
   }
@@ -126,8 +126,8 @@ fileRouter.post('/sync-google', async (req: AuthRequest, res, next) => {
 fileRouter.get('/:id', async (req: AuthRequest, res, next) => {
   try {
     const fileId = String(req.params.id)
-    const file = await prisma.file.findFirstOrThrow({ where: { id: fileId, userId: req.user!.id }, include: { connectedAccount: { select: { id: true, email: true, provider: true } }, folder: { select: { id: true, name: true } } } })
-    return res.json({ file: { ...file, sizeBytes: file.sizeBytes.toString() } })
+    const file = await prisma.file.findFirstOrThrow({ where: { id: fileId, userId: req.user!.id } })
+    return res.json({ file: { id: file.id, name: file.name, mimeType: file.mimeType, sizeBytes: file.sizeBytes.toString(), folderId: file.folderId, createdAt: file.createdAt, updatedAt: file.updatedAt } })
   } catch (error) {
     return next(error)
   }

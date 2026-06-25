@@ -9,7 +9,7 @@ import { ensureGoogleAppFolder, getAuthedGoogleClient, syncGoogleQuota } from '.
 export const uploadRouter = Router()
 uploadRouter.use(requireAuthOrApiKey)
 
-type UploadMeta = { fieldName: string; fileName: string; mimeType: string; sizeBytes: bigint; folderId?: string }
+type UploadMeta = { fieldName: string; fileName: string; mimeType: string; sizeBytes: bigint; folderId?: string; folder?: string }
 
 function logUpload(message: string, metadata?: Record<string, unknown>) {
   console.info('[upload]', message, metadata ?? '')
@@ -49,7 +49,7 @@ uploadRouter.post('/', async (req: AuthRequest, res, next) => {
     if (!contentType?.includes('multipart/form-data')) return res.status(400).json({ code: 'UPLOAD_INVALID_CONTENT_TYPE', message: 'multipart/form-data required.' })
 
     const busboy = Busboy({ headers: req.headers, limits: { files: 25, fileSize: env.MAX_UPLOAD_BYTES } })
-    const fields: { sizeBytes?: bigint; fileName?: string; mimeType?: string; folderId?: string } = {}
+    const fields: { sizeBytes?: bigint; fileName?: string; mimeType?: string; folderId?: string; folder?: string } = {}
     let batchMeta: UploadMeta[] | null = null
     let responded = false
     let fileSeen = false
@@ -66,18 +66,19 @@ uploadRouter.post('/', async (req: AuthRequest, res, next) => {
       return res.status(status).json({ code, message })
     }
 
-    const parseBatchMeta = (value: string) => JSON.parse(value).map((item: { fieldName: string; fileName: string; mimeType: string; sizeBytes: string | number; folderId?: string }) => ({
+    const parseBatchMeta = (value: string) => JSON.parse(value).map((item: { fieldName: string; fileName: string; mimeType: string; sizeBytes: string | number; folderId?: string; folder?: string }) => ({
       fieldName: item.fieldName,
       fileName: item.fileName,
       mimeType: item.mimeType,
       sizeBytes: BigInt(item.sizeBytes),
       folderId: item.folderId,
+      folder: item.folder,
     })) as UploadMeta[]
 
     const metaForFile = (fieldName: string, info: { filename: string; mimeType: string }) => {
       if (batchMeta) return batchMeta.find((item) => item.fieldName === fieldName)
       const sizeBytes = fields.sizeBytes
-      return { fieldName, sizeBytes: sizeBytes ?? 0n, fileName: fields.fileName || info.filename, mimeType: fields.mimeType || info.mimeType || 'application/octet-stream', folderId: fields.folderId }
+      return { fieldName, sizeBytes: sizeBytes ?? 0n, fileName: fields.fileName || info.filename, mimeType: fields.mimeType || info.mimeType || 'application/octet-stream', folderId: fields.folderId, folder: fields.folder }
     }
 
     const uploadOne = async (fieldName: string, fileStream: NodeJS.ReadableStream, info: { filename: string; mimeType: string }) => {
@@ -100,8 +101,24 @@ uploadRouter.post('/', async (req: AuthRequest, res, next) => {
         }
         if (knownSize) reservedBytesByAccount.set(account.id, (reservedBytesByAccount.get(account.id) ?? 0n) + meta!.sizeBytes)
 
-        const folderId = meta!.folderId || null
-        if (folderId) await prisma.folder.findFirstOrThrow({ where: { id: folderId, userId: req.user!.id, deletedAt: null } })
+        let resolvedFolderId = meta!.folderId || null
+        if (meta!.folder) {
+          const folder = await prisma.folder.findFirst({ where: { userId: req.user!.id, name: meta!.folder, deletedAt: null } })
+          if (!folder) {
+            fileStream.resume()
+            failed.push({ fileName, code: 'FOLDER_NOT_FOUND', message: `Folder "${meta!.folder}" not found.` })
+            return
+          }
+          resolvedFolderId = folder.id
+        }
+        if (resolvedFolderId) {
+          const exists = await prisma.folder.findFirst({ where: { id: resolvedFolderId, userId: req.user!.id, deletedAt: null } })
+          if (!exists) {
+            fileStream.resume()
+            failed.push({ fileName, code: 'FOLDER_NOT_FOUND', message: `Folder not found.` })
+            return
+          }
+        }
 
         const sessionSize = knownSize ? meta!.sizeBytes : 0n
         const session = await prisma.uploadSession.create({ data: { userId: req.user!.id, targetConnectedAccountId: account.id, fileName, mimeType: meta!.mimeType, sizeBytes: sessionSize, status: 'uploading' } })
@@ -133,7 +150,7 @@ uploadRouter.post('/', async (req: AuthRequest, res, next) => {
           data: {
             userId: req.user!.id,
             connectedAccountId: account.id,
-            folderId,
+            folderId: resolvedFolderId,
             provider: 'google_drive',
             providerFileId: uploaded.data.id ?? '',
             name: uploaded.data.name ?? fileName,
@@ -157,6 +174,7 @@ uploadRouter.post('/', async (req: AuthRequest, res, next) => {
       if (name === 'fileName') fields.fileName = value
       if (name === 'mimeType') fields.mimeType = value
       if (name === 'folderId') fields.folderId = value
+      if (name === 'folder') fields.folder = value
       if (name === 'filesMeta') batchMeta = parseBatchMeta(value)
     })
 
